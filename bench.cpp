@@ -1,35 +1,21 @@
+#include"bench.h"
 
-#include<string.h>
-#include<stdlib.h>
-#include <chrono>
-#include <iostream>
-#include <fcntl.h>
-#include <errno.h>
-
-#include <unistd.h>
-#include <sys/time.h>
-
-
-#include <pthread.h>
-
-#include <unordered_map>
-
-#include <libzbd/zbd.h>
 
 #define MAXSIZE 100
-#define MAXCOUNT 65535
-#define NUM_PTHREADS 1
+#define NUM_PTHREADS 2
+#define size_block 0x1000
+#define MAX_FILE_NAME_LENGTH 1024
+
+#define debug  std::cout<<"here are "<<std::endl;
 
 
-char num = '0';
-long offset = 0;
 using Byte = uint8_t;
-zbd_zone *zones;
-const char* dev_path = "/dev/nullb0";
-int flags = O_RDWR;
-struct zbd_info info;
-int dev_fd = zbd_open(dev_path, flags | O_LARGEFILE, &info);
 
+//const char* dev_path = "/dev/nullb0";
+int flags = O_RDWR;
+int num_thread;
+
+char filename[MAX_FILE_NAME_LENGTH] = "testfile.tmp";
 
 typedef struct re_value{
     long long w_count;
@@ -38,58 +24,105 @@ typedef struct re_value{
     double r_time;
 }re_value;
 
-re_value re[NUM_PTHREADS];
+void usage(void)
+{
+    fprintf(stderr,
+        "\n"
+ 
+        "SYNOPSIS\n"
+        "                [ -b num_block_perzone][ -f filename ] \n"
+        "                [ -p num_thread ]  \n"
+        "\n"
+    );
+}
 
-
-
-
+void get_options(int argc, char **argv, int *dev_fd, struct zbd_info *info)
+{
+    int opt;
+    while ((opt = getopt(argc, argv, "b:f:p:")) != -1) {
+        switch (opt) {
+        case 'b':
+            max_block = atoi(optarg);
+            if (max_block <= 0) {
+                printf("incorrect value %s. for - b <max_block_count>\n", optarg);
+                exit(-1);
+            }
+            //std::cout<<max_block<<std::endl;
+            break;
+        case 'f':
+            strncpy(filename, optarg, MAX_FILE_NAME_LENGTH - 1);
+            *dev_fd = zbd_open(filename, flags | O_LARGEFILE, info);
+            //std::cout<<filename<<" "<<*dev_fd<<std::endl;
+            if(*dev_fd < 0)
+            {
+                printf("Failed to open %s\n", filename);
+                exit(-2);
+            } 
+            break;
+        case 'p':
+            num_thread = atoi(optarg);
+                if (num_thread <= 0) {
+                printf("incorrect value %s. for - p <threads_count>\n", optarg);
+                exit(-3);
+            }
+        break;
+        }
+    }
+    
+}
 
 //read from the workload and get the instruction
 int get_instruction(FILE *f, char* ins, int *nwork, int *blocks){
-    char readchar[MAXSIZE] = "";
+    char* readchar = new char[MAXSIZE];
+    for(int i = 0; i < MAXSIZE; i++)
+    {
+        readchar[i] = '0';
+    }
     int i = 0, j = 0;
     int po = 0;
     // standard w 1 20     or   r   1
-    if(fgets(readchar,MAXSIZE,f)){
+    if(fgets(readchar,MAXSIZE,f) != NULL){
         *ins = readchar[0];
         if(*ins == 'w'){
-
-            for(i = 2; i < MAXSIZE; i++){
-                if(readchar[i] == ' '){
-                    po = i + 1;
+            char *tnum = new char[10];
+            for(int i = 0 ; i < 10; i++)
+                tnum[i] = '0';
+            int j = 0;
+            for(int i = 1; i < MAXSIZE; i++)
+            {
+                if(readchar[i] == ' ')
+                {
+                    po = i;
                     break;
                 }
+   
+                tnum[j++] = readchar[i];
 
             }
-            char n_work[20] = "";
-            for(j = 0; j < i-2; j++){
-                n_work[j] = readchar[2+j];
-            }
-            *nwork = atoi(n_work);
-
-            for(i = po; i < MAXSIZE; i++) {
-                if (readchar[i] == ' ')
-                    break;
-            }
-            char temp[20] = "";
-            for(j = 0; j < i-po; j++){
-                temp[j] = readchar[po+j];
-            }
-            *blocks = atoi(temp);
+            tnum[j] = '\0';
+            *nwork = atoi(tnum);
+            delete[] tnum;
+            *blocks = readchar[po+1] - '0';
         }else{
-            for(i = 2; i < MAXSIZE; i++){
-                if(readchar[i] == ' ')
+            char *tnum = new char[10];
+            for(int i = 0 ; i < 10; i++)
+            tnum[i] = '0';
+            int j = 0;
+            for(int i = 1; i < MAXSIZE; i++)
+            {
+                if(readchar[i] == '\0')
                     break;
+                tnum[j++] = readchar[i];
             }
-            char n_work[20] = "";
-            for(j = 0; j < i-2; j++){
-                n_work[j] = readchar[2+j];
-            }
-            *nwork = atoi(n_work);
+            tnum[j] = '\0';
+            *nwork = atoi(tnum);
+            delete[] tnum;
             *blocks = 0;
         }
+    delete[] readchar;
     return 0;
     }
+    delete[] readchar;
     return -1;
 }
 
@@ -188,7 +221,7 @@ void do_flush(int dev_fd) {
     if (err == -1) {
         std::cerr << "flush error" << std::endl;
     } else {
-        std::cout << "flush success" << std::endl;
+        //std::cout << "flush success" << std::endl;
     }
 }
 
@@ -203,45 +236,21 @@ FILE* open_trace(char num){
 
 
 
+void doo_io(int count, re_value *re,zbd_zone * zones, int dev_fd){
 
-typedef struct zone_table{
-    int num; //which work
-    int nblock; // how many 4k have
-    int start_nzone;//start to write
-    unsigned long long start_pt;
+    //std::cout<<count<<std::endl;
+    char c = '0' + count;
+    //std::cout<<c<<std::endl;    
+    FILE *trace = open_trace(c);
+    int thread_id = count;
 
-    bool is_change;// write full the first zone and change 
-    int change_nzone;
-    int change_nblock;
-}zone_table;
-
-
-void init_table(zone_table* tab, int numb, int nblocks, int start, unsigned long long pt){
-    tab->num = numb;
-    tab->nblock = nblocks;
-    tab->start_nzone = start;
-    tab->start_pt = pt;
-    tab->is_change = 0;
-    tab->change_nzone = 0;
-    tab->change_nblock = 0;
-}
-
-
-
-void *doo_io(void *args){
-    char count = *(char *)args;
-
-    FILE *trace = open_trace(count);
-
-    std::unordered_map<int,zone_table> work_map;
-
-    std::unordered_map<int,int> id_table;
-    int zone_id = int(count - '0');
-    id_table[zone_id] = 1;
+    std::unordered_map<int, std::list<zone_table>*> z_table;
 
     int num = 0;
-    char ins;
+    char ins = '0';
     int nblock = 0;
+
+    int allo_block = 0;
 
     int w_count = 0;
 
@@ -250,12 +259,17 @@ void *doo_io(void *args){
     // example data for writing
     //std::cout<<"is there ?"<<std::endl;
     for (int i = 0; i < nbyte; i++) {
-        buf[i] = 2;
+        buf[i] = '2';
     }
     if (buf == nullptr) {
         std::cerr << "malloc buf error!" << std::endl;
     }
-
+    int te_num[100];
+    int te_count = 0;
+    for(int i = 0; i < 100; i++)
+    {
+        te_num[i] = 0;
+    }
     //std::time_t start, end;
     long long rcount = 0;
     long long wcount = 0;
@@ -264,142 +278,116 @@ void *doo_io(void *args){
 
     struct timeval t1,t2;
 
+
+    int tenement_id = 0;
+    int tenement_count = 0;
+    int is_bad = 0;
+
     while(get_instruction(trace, &ins, &num, &nblock)!= -1)
-    {
-        if(ins == 'w'){
+    {   
+        int zone_id = 0;
+        if(tenement_count == 0 && ins == 'w')//第一个租户
+        {
+            tenement_id = num;//第一次写  记录tenement_id
+            std::list<zone_table> *list_head = new std::list<zone_table>();
+            z_table[tenement_id] = list_head;
+            tenement_count++;
+        }
+        //换租户
+        if(num != tenement_id && ins == 'w')
+        {
+            tenement_id = num;
+            std::list<zone_table> *new_list_head = new std::list<zone_table>();
+            z_table[tenement_id] = new_list_head;
+            te_count++;
+        }   
 
-            if(num == 1){
-                do_zone_ctl_operation(dev_fd, zones + zone_id, ZBD_OP_RESET);
-                update_zone_info(dev_fd, zones + zone_id);
-            }
-
-            if(work_map.find(num) == work_map.end()) {// new work
-                zone_table tab;
-                init_table(&tab, num, nblock, zone_id,(zones+zone_id)->wp);
-                work_map[num] = tab;
-                //std::cout<<"table info : "<<"start: "<<tab.start<<" num: "<<tab.num<<" nblocks: "<<tab.nblock<<std::endl;
-            }
+        if(ins == 'w')
+        {
             gettimeofday(&t1,NULL);
             for(int i = 0; i < nblock; i++){
-                do_zone_write(dev_fd, zones + zone_id, buf, nbyte);
-                w_count++;
+                int offset = allo_block;
 
-                wcount++;
+                zone_id = thread_id;
 
-                if(w_count == MAXCOUNT ){
+                allo_block++;
+                if(allo_block >= max_block)
+                break;
 
-                    zone_id += NUM_PTHREADS;
 
-                    work_map[num].is_change = 1;
-                    work_map[num].change_nblock = work_map[num].nblock - i - 1;
-                    work_map[num].change_nzone = zone_id;
-                    i = 0;
-                    w_count = 0;
-                    nblock = work_map[num].change_nblock;
-                    do_zone_ctl_operation(dev_fd, zones + zone_id, ZBD_OP_RESET);
-                    update_zone_info(dev_fd, zones + zone_id);
+                if(offset == -1)
+                {
+                    is_bad = 1;
+                    break;
                 }
-            }
 
+                zone_table new_block = {zone_id, offset};
+                std::list<zone_table> *list = z_table[tenement_id];
+                list->push_back(new_block);
+                
+               // debug;
+                do_zone_write(dev_fd, zones + zone_id, buf, nbyte);
+                wcount++;
+            }
             gettimeofday(&t2,NULL);
             wtime += ((t2.tv_sec - t1.tv_sec) + (double)(t2.tv_usec - t1.tv_usec)/1000000.0);
-            //std::cout<<"Threads"<<count<<"  table info : "<<" num: "<<work_map[num].num<<"start: "<<work_map[num].start_nzone<<" nblocks: "<<work_map[num].nblock<<std::endl;
-            //std::cout<<"Threads"<<count<<"  table info : "<<" num: "<<work_map[num].num<<"is_change: "<<work_map[num].is_change<<" change_start: "<<work_map[num].change_nzone<<"res_block"<<work_map[num].change_nblock<<std::endl;
-
-        }else{
-            int read_nblock = work_map[num].nblock;
-            bool is_change = work_map[num].is_change;
-            int start_zone_id = work_map[num].start_nzone;
-            int change_nblock = work_map[num].change_nblock;
-            unsigned long long offs = work_map[num].start_pt - (zones+start_zone_id)->start;
-
+            if(is_bad)
+                break;
+            //std::cout<<"in the write:"<<conf->z_table[tenement_id]->size()<<std::endl;
+            ins ='a';
+            num = 0;
+            nblock = 0;
+        }
+        if(ins == 'r')
+        {
+            std::list<zone_table> *list = z_table[num];
+            //std::cout<<"list size:"<<list->size()<<std::endl;
             gettimeofday(&t1,NULL);
-            if(is_change == false){
-                for(int i = 0; i < read_nblock; i++){
-                    Byte *r_buf = (Byte*) malloc(nbyte);
-                    do_zone_read(dev_fd, zones+start_zone_id, r_buf, nbyte, offs, false);
-                    rcount++;
-                    offs += 0x1000;
-                    free(r_buf);
-                }
-            }else{
-                int before_change_nblock = read_nblock - change_nblock;
-                for(int i = 0; i < before_change_nblock; i++){
-                    Byte *r_buf = (Byte*) malloc(nbyte);
-                    do_zone_read(dev_fd, zones+start_zone_id, r_buf, nbyte, offs, false);
-                    rcount++;
-                    offs += 0x1000;
-                    free(r_buf);
-                }
-                offs = 0;
-                for(int i = 0; i < change_nblock; i++){
-                    Byte *r_buf = (Byte*) malloc(nbyte);
-                    do_zone_read(dev_fd, zones+work_map[num].change_nzone, r_buf, nbyte, offs, false);
-                    rcount++;
-                    offs += 0x1000;
-                    free(r_buf);
-                }
-            }
+            for(auto z : *list)
+            {
+                
+                int zone_id = z.zone_id_;
+                int nblock = z.off_block;
+                //std::cout<<zone_id << " " << nblock<<std::endl;
+                Byte *r_buf = (Byte*) malloc(nbyte);
+                do_zone_read(dev_fd, zones+zone_id, r_buf, nbyte, nblock*size_block, false);
+                rcount++;
+                free(r_buf);
+            };
             gettimeofday(&t2,NULL);
             rtime +=((t2.tv_sec - t1.tv_sec) + (double)(t2.tv_usec - t1.tv_usec)/1000000.0);
-
-            }
-
+            ins ='a';
+            num = 0;
+            nblock = 0;
         }
+    }
 
-        re[int(count-'0')].w_count = wcount;
-        re[int(count-'0')].w_time = wtime ;
-        re[int(count-'0')].r_count = rcount;
-        re[int(count-'0')].r_time = rtime ;
+        re[count].w_count = wcount;
+        re[count].w_time = wtime ;
+        re[count].r_count = rcount;
+        re[count].r_time = rtime ;
+        //std::cout<<re[count].w_count<<std::endl;
 }
 
 
-
-void start_to_threads(int thread_count)
+void start_to_threads(int thread_count, re_value *re, zbd_zone * zones, int dev_fd)
 {
-    pthread_t *g_tid = NULL;
-    g_tid = (pthread_t*)malloc(sizeof(pthread_t*)*thread_count);
-
-    char count[thread_count];
-    if(g_tid == NULL)
-    {
-        perror("There is no more memory\n");
-        exit(errno);
-    }
-    //every thread has own workloads
-    for(int i = 0; i < thread_count; i++)
-    {
-        count[i] = '0'+i;
-    }
 
     int i = 0;
+    std::vector<std::thread> vth;
     for (i = 0; i < thread_count; i++)
     {
         //
-        
-        int ret = pthread_create(&g_tid[i],NULL,doo_io,&count[i]);
-           
-        if(ret != 0)
-        {
-            perror("error creating threads.\n");
-            if (ret == EAGAIN) {
-                perror("not enough system resources.\n");
-            }
-            exit(errno);            
-        }
-        
+        vth.push_back(std::thread(doo_io,i, re, zones, dev_fd));
+
     }
-    
 
-     
-    for (i = 0; i < thread_count; i++) {
-       if (pthread_join(g_tid[i], NULL) != 0)
-           perror("thread wait error.\n");
-    
-   }
-
-    if (g_tid != NULL)
-        free(g_tid);
+        for (auto vit = vth.begin(); vit!=vth.end(); vit++)
+    {
+        //
+        if(vit->joinable())
+            vit->join();
+    }
 }
 
 
@@ -407,27 +395,54 @@ void start_to_threads(int thread_count)
 
 int main(int argc, char *argv[]){
 
-    if (dev_fd < 0) {
-        std::cerr << "Open "<< dev_path << " failed" << std::endl;
-        return 1;
-    }
+   //znsconf *conf = new znsconf();
+    re_value *re = new re_value[num_thread];
+    zbd_zone *zones;
+    struct zbd_info info;
+    int dev_fd;
+    //debug;
+    //init_conf(conf);
+    //debug;
 
-
+    get_options(argc, argv, &dev_fd, &info);
+ 
+    //zbd_open_zones(dev_fd,0,671088640);
     unsigned int nr_zones;
     int ret = zbd_list_zones(dev_fd, 0, 0, zbd_report_option::ZBD_RO_ALL, &zones, &nr_zones);
+    //std::cout<<dev_fd<<" "<<ret<<" "<<nr_zones<<" "<<zones<<std::endl;
+    for(int i = 0; i < MAXZONE; ++i)
+    {
+        do_zone_ctl_operation(dev_fd,zones+i,ZBD_OP_OPEN);
+        do_zone_ctl_operation(dev_fd, zones + i, ZBD_OP_RESET);
+        update_zone_info(dev_fd, zones + i);
+    }
+
+    start_to_threads(num_thread, re,zones, dev_fd);
+
+    long long total_write = 0, total_read = 0;
+    double total_wtime = 0, total_rtime = 0;
+
+    for(int i = 0; i < num_thread; i++)
+    {
+        total_write += re[i].w_count;
+        total_read += re[i].r_count;
+        total_wtime += re[i].w_time;
+        total_rtime += re[i].r_time;
+    }
 
 
+    for(int i = 0; i < num_thread; i++){
+        std::cout<<"Thread "<<i<<" write counts "<<re[i].w_count <<" write time "<<re[i].w_time<<\
+        "s average rate: "<<(re[i].w_count) / (1024*64*re[i].w_time)<<"Gb/s"<<" write latency(s):"<<re[i].w_time / re[i].w_count<<std::endl;
 
-    start_to_threads(NUM_PTHREADS);
-
-    for(int i = 0; i < NUM_PTHREADS; i++){
-        std::cout<<"Thread "<<i<<" write counts "<<re[i].w_count /256 <<"Mb write time "<<re[i].w_time<<\
-        "s average rate: "<<(re[i].w_count) / (1024*256*re[i].w_time)<<"Gb/s"<<std::endl;
-
-        std::cout<<"Thread "<<i<<" read counts "<<re[i].r_count / 256 <<"Mb read time "<<re[i].r_time<<\
-        "s average rate: "<<(re[i].r_count) / (1024*256*re[i].r_time)<<"Gb/s"<<std::endl;
+        std::cout<<"Thread "<<i<<" read counts "<<re[i].r_count  <<" read time "<<re[i].r_time<<\
+        "s average rate: "<<(re[i].r_count) / (1024*64*re[i].r_time)<<"Gb/s"<<" read latency(s):"<<re[i].r_time / re[i].r_count<<std::endl;
 
     }
 
+    std::cout<<"total write counts "<<total_write <<" write time "<<total_wtime<<\
+    "s average rate: "<<(total_write) / (1024*64*total_wtime)<<"Gb/s"<<" write latency(s):"<<total_wtime / total_write<<std::endl;
+    std::cout<<"total read counts "<<total_read <<" write time "<<total_rtime<<\
+    "s average rate: "<<(total_read) / (1024*64*total_rtime)<<"Gb/s"<<" write latency(s):"<<total_rtime / total_read<<std::endl;
     return 0;
 }
